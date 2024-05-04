@@ -1,6 +1,9 @@
+mod request;
+
+use self::request::HttpRequest;
 use std::io::Result;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncWriteExt, BufReader, BufWriter},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream, ToSocketAddrs,
@@ -41,13 +44,18 @@ fn start_writer(
     let handle = tokio::spawn(async move {
         let mut writer = BufWriter::new(write_half);
 
-        if let Some(response) = rx.recv().await {
+        while let Some(response) = rx.recv().await {
             let line = format!(
-                "HTTP/1.1 {} {}\r\n\r\n",
+                "HTTP/1.1 {} {}\r\n",
                 response.status_code, response.status_line
             );
 
             writer.write_all(line.as_bytes()).await?;
+
+            writer
+                .write_all("content-length: 0\r\n\r\n".as_bytes())
+                .await?;
+
             writer.flush().await?;
         }
 
@@ -69,18 +77,30 @@ async fn read_loop(read_half: OwnedReadHalf, tx: mpsc::Sender<HttpResponse>) -> 
     let mut tasks = JoinSet::new();
 
     loop {
-        let request = read_request(&mut reader).await?;
-        let tx = tx.clone();
+        match request::read(&mut reader).await {
+            Ok(Some(request)) => {
+                let tx = tx.clone();
+                tasks.spawn(async move {
+                    let response = process_request(request).await;
+                    let _ = tx.send(response).await;
+                });
+            }
+            Ok(None) => {
+                break;
+            }
+            Err(error) => {
+                let response = HttpResponse {
+                    status_code: 400,
+                    status_line: format!("{}", error),
+                };
 
-        tasks.spawn(async move {
-            let response = process_request(request).await;
-            let _ = tx.send(response).await;
-        });
+                let _ = tx.send(response).await;
+            }
+        }
     }
-}
 
-#[allow(dead_code)]
-struct HttpRequest(String);
+    Ok(())
+}
 
 #[derive(Debug)]
 struct HttpResponse {
@@ -88,26 +108,15 @@ struct HttpResponse {
     status_line: String,
 }
 
-async fn read_request<R>(reader: &mut R) -> Result<HttpRequest>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut buffer = String::new();
-
-    loop {
-        reader.read_line(&mut buffer).await?;
-
-        if buffer.ends_with("\r\n\r\n") {
-            break;
-        }
-    }
-
-    Ok(HttpRequest(buffer))
-}
-
-async fn process_request(_: HttpRequest) -> HttpResponse {
-    HttpResponse {
-        status_code: 200,
-        status_line: "OK".to_string(),
+async fn process_request(request: HttpRequest) -> HttpResponse {
+    match request.target.as_str() {
+        "/" => HttpResponse {
+            status_code: 200,
+            status_line: "OK".to_string(),
+        },
+        _ => HttpResponse {
+            status_code: 404,
+            status_line: "Not Found".to_string(),
+        },
     }
 }
