@@ -45,17 +45,25 @@ fn start_writer(
         let mut writer = BufWriter::new(write_half);
 
         while let Some(response) = rx.recv().await {
-            let line = format!(
+            let status = format!(
                 "HTTP/1.1 {} {}\r\n",
                 response.status_code, response.status_line
             );
 
-            writer.write_all(line.as_bytes()).await?;
+            writer.write_all(status.as_bytes()).await?;
 
-            writer
-                .write_all("content-length: 0\r\n\r\n".as_bytes())
-                .await?;
+            if !response.has_content_length() {
+                let header = format!("content-length: {}\r\n", response.content.len());
+                writer.write_all(header.as_bytes()).await?;
+            }
 
+            for (key, value) in response.headers {
+                let header = format!("{}: {}\r\n", key, value);
+                writer.write_all(header.as_bytes()).await?;
+            }
+
+            writer.write_all("\r\n".as_bytes()).await?;
+            writer.write_all(response.content.as_slice()).await?;
             writer.flush().await?;
         }
 
@@ -89,11 +97,7 @@ async fn read_loop(read_half: OwnedReadHalf, tx: mpsc::Sender<HttpResponse>) -> 
                 break;
             }
             Err(error) => {
-                let response = HttpResponse {
-                    status_code: 400,
-                    status_line: format!("{}", error),
-                };
-
+                let response = HttpResponse::status(400, error.to_string());
                 let _ = tx.send(response).await;
             }
         }
@@ -106,17 +110,44 @@ async fn read_loop(read_half: OwnedReadHalf, tx: mpsc::Sender<HttpResponse>) -> 
 struct HttpResponse {
     status_code: u16,
     status_line: String,
+    headers: Vec<(String, String)>,
+    content: Vec<u8>,
+}
+
+impl HttpResponse {
+    fn status<T: Into<String>>(status_code: u16, status_line: T) -> Self {
+        Self {
+            status_code,
+            status_line: status_line.into(),
+            headers: vec![],
+            content: vec![],
+        }
+    }
+
+    fn ok<T: Into<String>>(content_type: T, content: Vec<u8>) -> Self {
+        Self {
+            status_code: 200,
+            status_line: "OK".to_string(),
+            headers: vec![("content-type".to_string(), content_type.into())],
+            content,
+        }
+    }
+
+    fn has_content_length(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+    }
 }
 
 async fn process_request(request: HttpRequest) -> HttpResponse {
     match request.target.as_str() {
-        "/" => HttpResponse {
-            status_code: 200,
-            status_line: "OK".to_string(),
-        },
-        _ => HttpResponse {
-            status_code: 404,
-            status_line: "Not Found".to_string(),
-        },
+        "/" => HttpResponse::status(200, "OK"),
+        path if path.starts_with("/echo/") => {
+            let message = &path[6..];
+            let content = message.as_bytes().to_vec();
+            HttpResponse::ok("text/plain", content)
+        }
+        _ => HttpResponse::status(404, "Not Found"),
     }
 }
