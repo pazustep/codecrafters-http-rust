@@ -143,6 +143,12 @@ impl HttpResponse {
 async fn process_request(request: HttpRequest) -> HttpResponse {
     match request.target.as_str() {
         "/" => HttpResponse::status(200, "OK"),
+        "/user-agent" => match request.headers.get("user-agent").map(|v| v.as_slice()) {
+            Some([user_agent, ..]) => {
+                HttpResponse::ok("text/plain", user_agent.as_bytes().to_vec())
+            }
+            _ => HttpResponse::status(400, "Bad Request"),
+        },
         path if path.starts_with("/echo/") => {
             let message = &path[6..];
             let content = message.as_bytes().to_vec();
