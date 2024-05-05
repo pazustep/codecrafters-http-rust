@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, str::FromStr, vec};
+use std::{collections::HashMap, fmt, io, num::ParseIntError, str::FromStr, vec};
 use thiserror::Error;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
@@ -14,14 +14,25 @@ pub struct HttpRequest {
 #[derive(Error, Debug)]
 pub struct HttpRequestError(Option<String>);
 
+impl From<io::Error> for HttpRequestError {
+    fn from(value: io::Error) -> Self {
+        println!("I/O error while parsing request: {}", value);
+        Self(None)
+    }
+}
+
+impl From<ParseIntError> for HttpRequestError {
+    fn from(value: ParseIntError) -> Self {
+        println!("error parsing value as integer: {}", value);
+        Self(None)
+    }
+}
+
 pub async fn read<R: AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> Result<Option<HttpRequest>, HttpRequestError> {
     let mut buffer = String::new();
-    let bytes_read = reader
-        .read_line(&mut buffer)
-        .await
-        .map_err(|_| HttpRequestError(None))?;
+    let bytes_read = reader.read_line(&mut buffer).await?;
 
     if bytes_read == 0 {
         return Ok(None);
@@ -32,10 +43,7 @@ pub async fn read<R: AsyncBufRead + Unpin>(
 
     loop {
         buffer.clear();
-        reader
-            .read_line(&mut buffer)
-            .await
-            .map_err(|_| HttpRequestError(None))?;
+        reader.read_line(&mut buffer).await?;
 
         if buffer.trim().is_empty() {
             break;
@@ -46,14 +54,23 @@ pub async fn read<R: AsyncBufRead + Unpin>(
         values.push(header.value);
     }
 
-    let mut body: Vec<u8> = vec![];
-
-    if request_line.method != "GET" {
-        reader
-            .read_to_end(&mut body)
-            .await
-            .map_err(|_| HttpRequestError(None))?;
-    }
+    let body: Vec<u8> = if request_line.method != "GET" {
+        match headers.get("content-length") {
+            Some(values) => {
+                let length = values.last().unwrap().parse::<usize>()?;
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).await?;
+                body
+            }
+            None => {
+                let mut body = Vec::new();
+                reader.read_to_end(&mut body).await?;
+                body
+            }
+        }
+    } else {
+        vec![]
+    };
 
     Ok(Some(HttpRequest {
         method: request_line.method,
