@@ -1,6 +1,7 @@
+mod handler;
 mod request;
 
-use self::request::HttpRequest;
+use crate::options::ServerOptions;
 use std::io::Result;
 use tokio::{
     io::{AsyncWriteExt, BufReader, BufWriter},
@@ -12,13 +13,17 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-pub fn start<A: ToSocketAddrs + Send + 'static>(addr: A) -> JoinHandle<Result<()>> {
+pub fn start<A: ToSocketAddrs + Send + 'static>(
+    addr: A,
+    options: ServerOptions,
+) -> JoinHandle<Result<()>> {
     tokio::spawn(async move {
         let listener = TcpListener::bind(addr).await?;
         let mut tasks = JoinSet::new();
 
         while let Ok((stream, _)) = listener.accept().await {
-            tasks.spawn(async move { handle_connection(stream).await });
+            let options = options.clone();
+            tasks.spawn(async move { handle_connection(options, stream).await });
         }
 
         while tasks.join_next().await.is_some() {}
@@ -26,10 +31,10 @@ pub fn start<A: ToSocketAddrs + Send + 'static>(addr: A) -> JoinHandle<Result<()
     })
 }
 
-async fn handle_connection(stream: TcpStream) -> Result<()> {
+async fn handle_connection(options: ServerOptions, stream: TcpStream) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     let (writer_handle, responses_tx) = start_writer(write_half);
-    let reader_handle = start_reader(read_half, responses_tx);
+    let reader_handle = start_reader(options, read_half, responses_tx);
 
     let _ = tokio::join!(writer_handle, reader_handle);
 
@@ -74,13 +79,18 @@ fn start_writer(
 }
 
 fn start_reader(
+    options: ServerOptions,
     read_half: OwnedReadHalf,
     tx: mpsc::Sender<HttpResponse>,
 ) -> JoinHandle<Result<()>> {
-    tokio::spawn(async move { read_loop(read_half, tx).await })
+    tokio::spawn(async move { read_loop(options, read_half, tx).await })
 }
 
-async fn read_loop(read_half: OwnedReadHalf, tx: mpsc::Sender<HttpResponse>) -> Result<()> {
+async fn read_loop(
+    options: ServerOptions,
+    read_half: OwnedReadHalf,
+    tx: mpsc::Sender<HttpResponse>,
+) -> Result<()> {
     let mut reader = BufReader::new(read_half);
     let mut tasks = JoinSet::new();
 
@@ -88,8 +98,9 @@ async fn read_loop(read_half: OwnedReadHalf, tx: mpsc::Sender<HttpResponse>) -> 
         match request::read(&mut reader).await {
             Ok(Some(request)) => {
                 let tx = tx.clone();
+                let options = options.clone();
                 tasks.spawn(async move {
-                    let response = process_request(request).await;
+                    let response = handler::handle(options, request).await;
                     let _ = tx.send(response).await;
                 });
             }
@@ -137,23 +148,5 @@ impl HttpResponse {
         self.headers
             .iter()
             .any(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-    }
-}
-
-async fn process_request(request: HttpRequest) -> HttpResponse {
-    match request.target.as_str() {
-        "/" => HttpResponse::status(200, "OK"),
-        "/user-agent" => match request.headers.get("user-agent").map(|v| v.as_slice()) {
-            Some([user_agent, ..]) => {
-                HttpResponse::ok("text/plain", user_agent.as_bytes().to_vec())
-            }
-            _ => HttpResponse::status(400, "Bad Request"),
-        },
-        path if path.starts_with("/echo/") => {
-            let message = &path[6..];
-            let content = message.as_bytes().to_vec();
-            HttpResponse::ok("text/plain", content)
-        }
-        _ => HttpResponse::status(404, "Not Found"),
     }
 }
