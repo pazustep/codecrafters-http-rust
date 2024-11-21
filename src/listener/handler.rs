@@ -25,7 +25,18 @@ pub async fn handle(options: ServerOptions, request: HttpRequest) -> HttpRespons
         ("GET", path, _) if path.starts_with("/echo/") => {
             let message = &path[6..];
             let content = message.as_bytes().to_vec();
-            HttpResponse::ok("text/plain", content)
+            let accept_encoding = request.headers.get("accept-encoding").map(|v| v.as_slice());
+            let mut response = HttpResponse::ok("text/plain", content);
+
+            if let Some([encoding, ..]) = accept_encoding {
+                if encoding.as_str() == "gzip" {
+                    response
+                        .headers
+                        .push(("content-encoding".to_string(), encoding.clone()));
+                }
+            }
+
+            response
         }
         ("GET", file, Some(root)) if file.starts_with("/files/") => {
             let path = root.join(&file[7..]);
@@ -46,6 +57,7 @@ pub async fn handle(options: ServerOptions, request: HttpRequest) -> HttpRespons
             let path = root.join(&file[7..]);
             let open_result = OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .mode(0o600)
                 .open(&path)
@@ -53,7 +65,7 @@ pub async fn handle(options: ServerOptions, request: HttpRequest) -> HttpRespons
 
             match open_result {
                 Ok(mut file) => match file.write_all(request.body.as_slice()).await {
-                    Ok(_) => HttpResponse::status(201, "Accepted"),
+                    Ok(_) => HttpResponse::status(201, "Created"),
                     Err(err) => {
                         println!("Error writing request body to file {:?}: {}", path, err);
                         HttpResponse::status(500, "Internal Server Error")
