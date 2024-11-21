@@ -25,15 +25,19 @@ pub async fn handle(options: ServerOptions, request: HttpRequest) -> HttpRespons
         ("GET", path, _) if path.starts_with("/echo/") => {
             let message = &path[6..];
             let content = message.as_bytes().to_vec();
-            let accept_encoding = request.headers.get("accept-encoding").map(|v| v.as_slice());
             let mut response = HttpResponse::ok("text/plain", content);
+            let is_gzip = request
+                .headers
+                .get("accept-encoding")
+                .iter()
+                .flat_map(|v| v.iter())
+                .flat_map(|v| v.split(','))
+                .any(|v| v.trim() == "gzip");
 
-            if let Some([encoding, ..]) = accept_encoding {
-                if encoding.as_str() == "gzip" {
-                    response
-                        .headers
-                        .push(("content-encoding".to_string(), encoding.clone()));
-                }
+            if is_gzip {
+                response
+                    .headers
+                    .push(("content-encoding".to_string(), "gzip".to_string()));
             }
 
             response
