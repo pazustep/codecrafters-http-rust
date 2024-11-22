@@ -144,6 +144,15 @@ impl HttpResponse {
         }
     }
 
+    fn ok_with_headers(content: Vec<u8>, headers: Vec<(String, String)>) -> Self {
+        Self {
+            status_code: 200,
+            status_line: "OK".to_string(),
+            headers,
+            content,
+        }
+    }
+
     fn has_content_length(&self) -> bool {
         self.headers
             .iter()
